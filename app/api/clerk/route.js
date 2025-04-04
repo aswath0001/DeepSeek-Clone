@@ -4,78 +4,73 @@ import { NextResponse } from "next/server";
 import connectDB from "@/config/db";
 import User from "@/models/User";
 
-export const dynamic = 'force-dynamic'; // Needed for Vercel
+export const dynamic = 'force-dynamic'; // Required for Vercel
 
 export async function POST(req) {
   try {
-    console.log("🔵 Clerk webhook received");
+    console.log("🔵 Webhook received");
 
-    // 1. Get and verify headers
+    // 1. Get headers and verify webhook
+    const headerPayload = headers();
     const svixHeaders = {
-      "svix-id": headers().get("svix-id"),
-      "svix-timestamp": headers().get("svix-timestamp"),
-      "svix-signature": headers().get("svix-signature")
+      "svix-id": headerPayload.get("svix-id"),
+      "svix-timestamp": headerPayload.get("svix-timestamp"),
+      "svix-signature": headerPayload.get("svix-signature")
     };
 
+    // Verify required headers exist
     if (!svixHeaders["svix-id"] || !svixHeaders["svix-signature"]) {
       return NextResponse.json(
-        { error: "Missing required Svix headers" },
+        { error: "Missing required headers" },
         { status: 400 }
       );
     }
 
-    // 2. Verify webhook
+    // 2. Parse and verify payload
     const payload = await req.json();
     const wh = new Webhook(process.env.SIGNING_SECRET);
     const evt = wh.verify(JSON.stringify(payload), svixHeaders);
-    
+
     console.log(`🔵 Processing event: ${evt.type}`);
 
-    // 3. Connect to DB only for user events
+    // 3. Only process user events
     if (evt.type.startsWith("user.")) {
       await connectDB();
 
-      // Safely extract data with defaults
-      const { id } = evt.data;
-      const email = evt.data.email_addresses?.[0]?.email_address || null;
-      const firstName = evt.data.first_name || "";
-      const lastName = evt.data.last_name || "";
-      const image = evt.data.image_url || "";
+      // SAFELY extract data with null checks
+      const userData = {
+        _id: evt.data.id,
+        email: evt.data.email_addresses?.[0]?.email_address || null,
+        name: `${evt.data.first_name || ''} ${evt.data.last_name || ''}`.trim(),
+        image: evt.data.image_url || null
+      };
 
-      if (!email) {
-        console.warn("⚠️ No email found in payload:", evt.data);
+      // Validate required fields
+      if (!userData.email) {
+        console.warn("⚠️ No email in payload:", evt.data);
         return NextResponse.json(
-          { warning: "No email in payload" },
+          { warning: "No email provided" },
           { status: 200 }
         );
       }
 
-      const userData = {
-        _id: id,
-        email,
-        name: `${firstName} ${lastName}`.trim(),
-        image
-      };
-
-      // 4. Handle events
+      // 4. Handle different event types
       switch (evt.type) {
         case "user.created":
           await User.create(userData);
-          console.log(`🟢 Created user: ${id}`);
           break;
-          
         case "user.updated":
           await User.findOneAndUpdate(
-            { _id: id },
+            { _id: userData._id },
             userData,
             { upsert: true, new: true }
           );
           break;
-          
         case "user.deleted":
-          await User.findByIdAndDelete(id);
+          await User.findByIdAndDelete(userData._id);
           break;
       }
+      console.log(`🟢 Processed ${evt.type} for user ${userData._id}`);
     }
 
     return NextResponse.json({ success: true });
@@ -83,19 +78,8 @@ export async function POST(req) {
   } catch (err) {
     console.error("🔴 Webhook error:", err);
     return NextResponse.json(
-      { error: err.message || "Processing failed" },
+      { error: err.message },
       { status: err.message.includes("Missing") ? 400 : 500 }
     );
   }
-}
-
-// Required for CORS preflight
-export async function OPTIONS() {
-  return NextResponse.json({}, {
-    headers: {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, svix-*',
-    }
-  });
 }
