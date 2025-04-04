@@ -1,16 +1,19 @@
+// app/api/clerk/route.js
 import { Webhook } from "svix";
 import { headers } from "next/headers";
 import { NextResponse } from "next/server";
 import connectDB from "@/config/db";
 import User from "@/models/User";
 
-export const dynamic = 'force-dynamic'; // Required for Vercel
+// ================== FIX 1: Force Dynamic ==================
+export const dynamic = 'force-dynamic';
 
+// ================== FIX 2: Handle POST ==================
 export async function POST(req) {
   try {
-    console.log("🔵 Webhook received");
+    console.log("🟢 Webhook received");
 
-    // 1. Verify webhook headers
+    // 1. Verify headers
     const svixHeaders = {
       "svix-id": headers().get("svix-id"),
       "svix-timestamp": headers().get("svix-timestamp"),
@@ -29,7 +32,7 @@ export async function POST(req) {
     const wh = new Webhook(process.env.SIGNING_SECRET);
     const evt = wh.verify(JSON.stringify(payload), svixHeaders);
 
-    console.log(`🔵 Processing event: ${evt.type}`);
+    console.log(`🟢 Processing: ${evt.type}`);
 
     // 3. Handle user events
     if (evt.type.startsWith("user.")) {
@@ -39,11 +42,8 @@ export async function POST(req) {
       const email = email_addresses?.[0]?.email_address;
 
       if (!email) {
-        console.warn("⚠️ No email found in payload");
-        return NextResponse.json(
-          { warning: "No email provided" },
-          { status: 200 }
-        );
+        console.warn("⚠️ No email found");
+        return NextResponse.json({ warning: "No email" }, { status: 200 });
       }
 
       const userData = {
@@ -69,7 +69,7 @@ export async function POST(req) {
     return NextResponse.json({ success: true });
 
   } catch (err) {
-    console.error("🔴 Webhook error:", err);
+    console.error("🔴 Error:", err);
     return NextResponse.json(
       { error: err.message },
       { status: 500 }
@@ -77,7 +77,7 @@ export async function POST(req) {
   }
 }
 
-// Required for CORS preflight
+// ================== FIX 3: Add CORS Support ==================
 export async function OPTIONS() {
   return NextResponse.json(
     {},
