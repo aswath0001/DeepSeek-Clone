@@ -10,67 +10,60 @@ export async function POST(req) {
   try {
     console.log("🔵 Webhook received");
 
-    // 1. Get headers and verify webhook
-    const headerPayload = headers();
+    // 1. Verify webhook headers
     const svixHeaders = {
-      "svix-id": headerPayload.get("svix-id"),
-      "svix-timestamp": headerPayload.get("svix-timestamp"),
-      "svix-signature": headerPayload.get("svix-signature")
+      "svix-id": headers().get("svix-id"),
+      "svix-timestamp": headers().get("svix-timestamp"),
+      "svix-signature": headers().get("svix-signature"),
     };
 
-    // Verify required headers exist
     if (!svixHeaders["svix-id"] || !svixHeaders["svix-signature"]) {
       return NextResponse.json(
-        { error: "Missing required headers" },
+        { error: "Missing Svix headers" },
         { status: 400 }
       );
     }
 
-    // 2. Parse and verify payload
+    // 2. Verify payload
     const payload = await req.json();
     const wh = new Webhook(process.env.SIGNING_SECRET);
     const evt = wh.verify(JSON.stringify(payload), svixHeaders);
 
     console.log(`🔵 Processing event: ${evt.type}`);
 
-    // 3. Only process user events
+    // 3. Handle user events
     if (evt.type.startsWith("user.")) {
       await connectDB();
 
-      // SAFELY extract data with null checks
-      const userData = {
-        _id: evt.data.id,
-        email: evt.data.email_addresses?.[0]?.email_address || null,
-        name: `${evt.data.first_name || ''} ${evt.data.last_name || ''}`.trim(),
-        image: evt.data.image_url || null
-      };
+      const { id, email_addresses, first_name, last_name, image_url } = evt.data;
+      const email = email_addresses?.[0]?.email_address;
 
-      // Validate required fields
-      if (!userData.email) {
-        console.warn("⚠️ No email in payload:", evt.data);
+      if (!email) {
+        console.warn("⚠️ No email found in payload");
         return NextResponse.json(
           { warning: "No email provided" },
           { status: 200 }
         );
       }
 
-      // 4. Handle different event types
+      const userData = {
+        _id: id,
+        email,
+        name: `${first_name || ""} ${last_name || ""}`.trim(),
+        image: image_url || null,
+      };
+
       switch (evt.type) {
         case "user.created":
           await User.create(userData);
           break;
         case "user.updated":
-          await User.findOneAndUpdate(
-            { _id: userData._id },
-            userData,
-            { upsert: true, new: true }
-          );
+          await User.findOneAndUpdate({ _id: id }, userData, { upsert: true });
           break;
         case "user.deleted":
-          await User.findByIdAndDelete(userData._id);
+          await User.findByIdAndDelete(id);
           break;
       }
-      console.log(`🟢 Processed ${evt.type} for user ${userData._id}`);
     }
 
     return NextResponse.json({ success: true });
@@ -79,7 +72,21 @@ export async function POST(req) {
     console.error("🔴 Webhook error:", err);
     return NextResponse.json(
       { error: err.message },
-      { status: err.message.includes("Missing") ? 400 : 500 }
+      { status: 500 }
     );
   }
+}
+
+// Required for CORS preflight
+export async function OPTIONS() {
+  return NextResponse.json(
+    {},
+    {
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, svix-*",
+      },
+    }
+  );
 }
