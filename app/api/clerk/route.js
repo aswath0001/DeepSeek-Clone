@@ -4,65 +4,98 @@ import { NextResponse } from "next/server";
 import connectDB from "@/config/db";
 import User from "@/models/User";
 
+export const dynamic = 'force-dynamic'; // Needed for Vercel
+
 export async function POST(req) {
   try {
-    // 1. Connect to database
-    await connectDB();
-    console.log("✅ Connected to database");
+    console.log("🔵 Clerk webhook received");
 
-    // 2. Get headers and verify webhook
-    const headerPayload = headers();
+    // 1. Get and verify headers
     const svixHeaders = {
-      "svix-id": headerPayload.get("svix-id"),
-      "svix-timestamp": headerPayload.get("svix-timestamp"),
-      "svix-signature": headerPayload.get("svix-signature"),
+      "svix-id": headers().get("svix-id"),
+      "svix-timestamp": headers().get("svix-timestamp"),
+      "svix-signature": headers().get("svix-signature")
     };
 
-    // 3. Verify webhook signature
+    if (!svixHeaders["svix-id"] || !svixHeaders["svix-signature"]) {
+      return NextResponse.json(
+        { error: "Missing required Svix headers" },
+        { status: 400 }
+      );
+    }
+
+    // 2. Verify webhook
     const payload = await req.json();
     const wh = new Webhook(process.env.SIGNING_SECRET);
     const evt = wh.verify(JSON.stringify(payload), svixHeaders);
     
-    console.log("🔵 Webhook verified:", evt.type);
+    console.log(`🔵 Processing event: ${evt.type}`);
 
-    // 4. Handle the event
-    const { id, email_addresses, first_name, last_name, image_url } = evt.data;
-    
-    // Safely get email
-    const email = email_addresses?.[0]?.email_address;
-    if (!email) {
-      throw new Error("No email found in webhook payload");
+    // 3. Connect to DB only for user events
+    if (evt.type.startsWith("user.")) {
+      await connectDB();
+
+      // Safely extract data with defaults
+      const { id } = evt.data;
+      const email = evt.data.email_addresses?.[0]?.email_address || null;
+      const firstName = evt.data.first_name || "";
+      const lastName = evt.data.last_name || "";
+      const image = evt.data.image_url || "";
+
+      if (!email) {
+        console.warn("⚠️ No email found in payload:", evt.data);
+        return NextResponse.json(
+          { warning: "No email in payload" },
+          { status: 200 }
+        );
+      }
+
+      const userData = {
+        _id: id,
+        email,
+        name: `${firstName} ${lastName}`.trim(),
+        image
+      };
+
+      // 4. Handle events
+      switch (evt.type) {
+        case "user.created":
+          await User.create(userData);
+          console.log(`🟢 Created user: ${id}`);
+          break;
+          
+        case "user.updated":
+          await User.findOneAndUpdate(
+            { _id: id },
+            userData,
+            { upsert: true, new: true }
+          );
+          break;
+          
+        case "user.deleted":
+          await User.findByIdAndDelete(id);
+          break;
+      }
     }
 
-    const userData = {
-      _id: id,
-      email,
-      name: `${first_name || ''} ${last_name || ''}`.trim(),
-      image: image_url,
-    };
-
-    switch (evt.type) {
-      case "user.created":
-        await User.create(userData);
-        console.log("🟢 User created:", id);
-        break;
-        
-      case "user.updated":
-        await User.findByIdAndUpdate(id, userData);
-        break;
-        
-      case "user.deleted":
-        await User.findByIdAndDelete(id);
-        break;
-    }
-
-    return NextResponse.json({ success: true }, { status: 200 });
+    return NextResponse.json({ success: true });
 
   } catch (err) {
-    console.error("🔴 Webhook error:", err.message);
+    console.error("🔴 Webhook error:", err);
     return NextResponse.json(
-      { error: err.message || "Webhook processing failed" },
-      { status: 400 }
+      { error: err.message || "Processing failed" },
+      { status: err.message.includes("Missing") ? 400 : 500 }
     );
   }
+}
+
+// Required for CORS preflight
+export async function OPTIONS() {
+  return NextResponse.json({}, {
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, svix-*',
+    }
+  });
 }
